@@ -1,0 +1,155 @@
+openapi: 3.0.3
+info:
+  title: Image Enhancer API
+  version: 1.0.0
+  description: |
+    Upscales and restores low-resolution or blurry images using
+    Real-ESRGAN (`realesrgan-ncnn-vulkan`). Two models are available:
+
+    - `fast` — `realesr-general-x4v3`, compact model (~5 s for 800×800 on an Intel iGPU)
+    - `quality` — `realesrgan-x4plus`, larger model, slightly cleaner (~50 s)
+
+    Jobs run one at a time on the GPU. Additional requests wait in a queue
+    (max 8); beyond that the server responds with `503`. Each job has a
+    5-minute timeout.
+servers:
+  - url: /
+tags:
+  - name: enhance
+    description: Image enhancement
+  - name: system
+    description: Service status
+paths:
+  /enhance:
+    post:
+      tags: [enhance]
+      summary: Enhance an image
+      description: |
+        Upload a PNG, JPEG or WebP image and receive the enhanced image in the
+        response body. The file type is detected from its contents, not its
+        name. Default limits: 20 MB upload, 2000 px max width/height
+        (configurable with `-max-upload-mb` and `-max-side`).
+      operationId: enhanceImage
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [image]
+              properties:
+                image:
+                  type: string
+                  format: binary
+                  description: Image file (png, jpg, jpeg or webp).
+                scale:
+                  type: number
+                  minimum: 1
+                  maximum: 4
+                  default: 4
+                  description: Upscale factor.
+                model:
+                  type: string
+                  enum: [fast, quality]
+                  default: fast
+                  description: "`fast` (realesr-general-x4v3) or `quality` (realesrgan-x4plus)."
+                format:
+                  type: string
+                  enum: [png, jpg, webp]
+                  description: Output format. Defaults to the uploaded image's format (webp in → webp out, png → png, jpg → jpg).
+                quality:
+                  type: integer
+                  minimum: 1
+                  maximum: 100
+                  default: 95
+                  description: Quality for lossy output (jpg, webp).
+            encoding:
+              image:
+                contentType: image/png, image/jpeg, image/webp
+      responses:
+        "200":
+          description: Enhanced image.
+          headers:
+            Content-Disposition:
+              schema: { type: string }
+              description: Suggested filename, e.g. `inline; filename="photo_enhanced.png"`.
+            X-Input-Size:
+              schema: { type: string, example: 800x800 }
+              description: Input dimensions.
+            X-Output-Size:
+              schema: { type: string, example: 3200x3200 }
+              description: Output dimensions.
+            X-Model:
+              schema: { type: string, example: realesr-general-x4v3 }
+              description: Model that produced the image.
+            X-Processing-Time:
+              schema: { type: string, example: 5.4s }
+              description: Total server-side processing time.
+          content:
+            image/png:
+              schema: { type: string, format: binary }
+            image/jpeg:
+              schema: { type: string, format: binary }
+            image/webp:
+              schema: { type: string, format: binary }
+        "400":
+          description: Missing or invalid field, or undecodable image.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { error: scale must be a number between 1 and 4 }
+        "413":
+          description: Upload too large or image dimensions exceed the limit.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { error: "image is 4000x3000; max allowed side is 2000 px" }
+        "415":
+          description: File is not PNG, JPEG or WebP.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { error: 'unsupported file type "text/plain; charset=utf-8" (allowed: png, jpg, jpeg, webp)' }
+        "500":
+          description: Enhancement failed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          description: Queue is full; retry later.
+          headers:
+            Retry-After:
+              schema: { type: integer, example: 30 }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "504":
+          description: Job exceeded the 5-minute timeout.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /health:
+    get:
+      tags: [system]
+      summary: Service status
+      operationId: health
+      responses:
+        "200":
+          description: Service is up.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+components:
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+    Health:
+      type: object
+      properties:
+        status: { type: string, example: ok }
+        model: { type: string, description: Default model, example: realesr-general-x4v3 }
+        busy: { type: integer, description: Jobs currently running, example: 0 }
+        waiting: { type: integer, description: Jobs waiting in the queue, example: 0 }
